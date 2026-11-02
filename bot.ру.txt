@@ -1,0 +1,117 @@
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
+
+# ВСТАВЬ СЮДА СВОЙ ТОКЕН (в кавычках)
+BOT_TOKEN = "ТВОЙ_ТОКЕН_ЗДЕСЬ"
+
+# ТУТ ВАШИ ID С БРАТОМ (узнаем ниже, как их получить)
+ADMIN_IDS = [6329642874, 8106170210]
+
+logging.basicConfig(level=logging.INFO)
+
+bot = 9017938853:AAHuxZLLpv082DRbEFGAxu9b2EDLvtftrPQ
+dp = Dispatcher()
+
+# Состояние, когда брат вводит цену
+class AdminPrice(StatesGroup):
+    waiting_for_amount = State()
+
+# Словарь для хранения заказов (в реальности лучше база данных, но для старта сойдет)
+orders = {}
+
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    await message.answer("Привет! Отправь мне картинку (референс), и я передам её мастеру для оценки.")
+
+# Ловим картинку от покупателя
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    # Берем картинку в максимальном качестве
+    photo = message.photo[-1]
+    order_id = message.message_id
+    
+    # Сохраняем ID покупателя
+    orders[order_id] = {"buyer_id": message.from_user.id, "photo_id": photo.file_id}
+    
+    await message.answer("✅ Твоя картинка принята! Жди, мастер оценит сложность и пришлет цену.")
+    
+    # Пересылаем фото админам (тебе и брату)
+    for admin_id in ADMIN_IDS:
+        try:
+            # Отправляем фото с кнопкой
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💰 Ввести цену в Stars", callback_data=f"setprice:{order_id}")]
+            ])
+            await bot.send_photo(
+                chat_id=admin_id,
+                photo=photo.file_id,
+                caption=f"🔥 Новый заказ!\nПокупатель: @{message.from_user.username}\nID заказа: {order_id}",
+                reply_markup=kb
+            )
+        except Exception as e:
+            print(f"Не смог отправить админу {admin_id}: {e}")
+
+# Админ нажимает кнопку "Ввести цену"
+@dp.callback_query(F.data.startswith("setprice:"))
+async def ask_amount(callback: types.CallbackQuery, state: FSMContext):
+    order_id = int(callback.data.split(":")[1])
+    await state.update_data(order_id=order_id)
+    await state.set_state(AdminPrice.waiting_for_amount)
+    await callback.message.answer("Введи сумму в Stars (только число):")
+    await callback.answer()
+
+# Ловим введенную сумму и выставляем счет
+@dp.message(AdminPrice.waiting_for_amount)
+async def process_amount(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("Ошибка! Введи только число (например, 100).")
+        return
+    
+    amount = int(message.text)
+    data = await state.get_data()
+    order_id = data["order_id"]
+    buyer_id = orders[order_id]["buyer_id"]
+    
+    # Выставляем счет покупателю (оплата Stars)
+    try:
+        await bot.send_invoice(
+            chat_id=buyer_id,
+            title="Скин Minecraft",
+            description="Индивидуальный скин по твоему референсу",
+            payload=f"order_{order_id}",
+            provider_token="",  # Для Stars пустая строка
+            currency="XTR",     # Код валюты Stars
+            prices=[LabeledPrice(label="Скин", amount=amount)]
+        )
+        await message.answer(f"✅ Счет на {amount} ⭐ отправлен покупателю!")
+    except Exception as e:
+        await message.answer(f"Ошибка при отправке счета: {e}")
+        
+    await state.clear()
+
+# Тут бот получает уведомление, что покупатель ОПЛАТИЛ
+@dp.pre_checkout_query()
+async def pre_checkout(pre_checkout_query: types.PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def success_payment(message: types.Message):
+    await message.answer("🎉 Оплата прошла! Мастер уже начал рисовать твой скин.")
+    
+    # Уведомляем админов об оплате
+    for admin_id in ADMIN_IDS:
+        await bot.send_message(
+            admin_id, 
+            f"💸 ЗАКАЗ ОПЛАЧЕН!\nПользователь @{message.from_user.username} оплатил скин.\nМожно приступать к рисованию!"
+        )
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
